@@ -1,0 +1,259 @@
+---
+title: HW 4-2
+jupyter: econ470-a0kernel
+execute:
+  echo: false
+---
+
+```{python}
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy import stats
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+```
+
+```{python}
+years = range(1997, 2026)
+for year in years:
+    exec(f"data_{year} = pd.read_csv(f'../hw4/data/data-{year}.csv')")
+
+#merged
+dfs = []
+for year in years:
+    df = pd.read_csv(f'../hw4/data/data-{year}.csv')
+    dfs.append(df)
+
+# Concatenate into one DataFrame
+data = pd.concat(dfs, ignore_index=True)
+```
+
+```{python}
+filtered = data[(data["year"] >= 2009) & (data["year"] <= 2019)]
+```
+
+### Question 1
+
+```{python}
+multi = filtered[(filtered['source'] != 'unique reports') & 
+              (filtered['year'] >= 2009) & 
+              (filtered['year'] <= 2019)]
+
+result = multi.groupby('year')['provider_number'].nunique().reset_index()
+result.columns = ['year', 'num_hospitals']
+
+plt.figure(figsize=(10, 5))
+plt.plot(result['year'], result['num_hospitals'], marker='o')
+plt.title('Hospitals Filing More Than One Report Per Year (2009-2019)')
+plt.xlabel('Year')
+plt.ylabel('Number of Hospitals')
+plt.xticks(result['year'])
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+### Question 2
+
+```{python}
+filtered['provider_number'].nunique()
+```
+
+### Question 3
+
+```{python}
+plt.figure(figsize=(14, 6))
+sns.violinplot(data=filtered, x='year', y='tot_charges')
+
+filtered = filtered[filtered['tot_charges'] > 0]
+filtered = filtered[filtered['tot_charges'] < filtered['tot_charges'].quantile(0.99)]
+
+plt.title('Distribution of Total Charges by Year (2009-2019)')
+plt.xlabel('Year')
+plt.ylabel('Total Charges')
+plt.tight_layout()
+plt.show()
+```
+
+### Question 4
+
+```{python}
+filtered['discount_factor'] = 1 - filtered['tot_discounts'] / filtered['tot_charges']
+filtered['price_num'] = (filtered['ip_charges'] + filtered['icu_charges'] + filtered['ancillary_charges']) * filtered['discount_factor'] - filtered['tot_mcare_payment']
+filtered['price_denom'] = filtered['tot_discharges'] - filtered['mcare_discharges']
+filtered['price'] = filtered['price_num'] / filtered['price_denom']
+
+filtered = filtered[filtered['price'] > 0]
+filtered = filtered[filtered['price'] < filtered['price'].quantile(0.99)]
+
+plt.figure(figsize=(14, 6))
+sns.violinplot(data=filtered, x='year', y='price')
+plt.title('Distribution of Estimated Hospital Prices by Year (2009-2019)')
+plt.xlabel('Year')
+plt.ylabel('Estimated Price')
+plt.tight_layout()
+plt.show()
+```
+
+### Question 5
+
+```{python}
+filt = data[(data["year"] >= 2012) & (data["year"] <= 2019)]
+filt['penalize'] = (filt['hrrp_payment'] < 0) | (filt['hvbp_payment'] < 0)
+
+result = filt.groupby('year')['penalize'].mean().reset_index()
+result.columns = ['year', 'share_penalized']
+
+plt.figure(figsize=(10, 5))
+plt.plot(result['year'], result['share_penalized'], marker='o')
+plt.title('Share of Hospitals Penalized Under HRRP/VBP (2012-2019)')
+plt.xlabel('Year')
+plt.ylabel('Share of Hospitals Penalized')
+plt.xticks(result['year'])
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+### Question 6
+
+```{python}
+from statsmodels.iolib.summary2 import summary_col
+
+def calc_price(df):
+    df = df.copy()
+    df['discount_factor'] = 1 - df['tot_discounts'] / df['tot_charges']
+    df['price_num'] = (df['ip_charges'] + df['icu_charges'] + df['ancillary_charges']) * df['discount_factor'] - df['tot_mcare_payment']
+    df['price_denom'] = df['tot_discharges'] - df['mcare_discharges']
+    df['price'] = df['price_num'] / df['price_denom']
+    return df
+
+price_2011 = calc_price(filtered[filtered['year'] == 2011])[['provider_number', 'price']].rename(columns={'price': 'price_2011'})
+price_2014 = calc_price(filtered[filtered['year'] == 2014])[['provider_number', 'price']].rename(columns={'price': 'price_2014'})
+price_change = price_2011.merge(price_2014, on='provider_number')
+price_change['price_change'] = price_change['price_2014'] - price_change['price_2011']
+
+pen_2012 = filtered[filtered['year'] == 2012][['provider_number', 'hrrp_payment', 'hvbp_payment']].copy()
+pen_2012['hrrp_payment'] = pen_2012['hrrp_payment'].fillna(0)
+pen_2012['hvbp_payment'] = pen_2012['hvbp_payment'].fillna(0)
+pen_2012['net_penalty'] = pen_2012['hrrp_payment'] + pen_2012['hvbp_payment']
+
+# Pre-2012 
+pre = filtered[(filtered['year'] >= 2009) & (filtered['year'] <= 2011)]
+pre_avg = pre.groupby('provider_number').agg(
+    avg_mcare_discharges=('mcare_discharges', 'mean'),
+    avg_beds=('beds', 'mean'),
+    avg_mcaid_discharges=('mcaid_discharges', 'mean')
+).reset_index()
+
+# merge
+df_iv = price_change.merge(pen_2012[['provider_number', 'net_penalty']], on='provider_number')
+df_iv = df_iv.merge(pre_avg, on='provider_number')
+
+# clean
+df_iv = df_iv[df_iv['price_2011'] > 0]
+df_iv = df_iv[df_iv['price_2014'] > 0]
+df_iv = df_iv[df_iv['price_change'].between(df_iv['price_change'].quantile(0.01), df_iv['price_change'].quantile(0.99))]
+
+# reg
+ols1 = smf.ols('price_change ~ net_penalty', data=df_iv).fit()
+ols2 = smf.ols('price_change ~ net_penalty + avg_beds', data=df_iv).fit()
+ols3 = smf.ols('price_change ~ net_penalty + avg_beds + avg_mcaid_discharges', data=df_iv).fit()
+
+table = summary_col(
+    [ols1, ols2, ols3],
+    stars=True,
+    model_names=['Baseline', 'Baseline + Beds', 'Baseline + Beds + Medicaid'],
+    info_dict={'N': lambda x: f"{int(x.nobs):,}", 'R²': lambda x: f"{x.rsquared:.3f}"}
+)
+
+print(table)
+```
+
+### Question 7
+
+```{python}
+plt.figure(figsize=(10, 6))
+plt.scatter(df_iv['avg_mcare_discharges'], df_iv['net_penalty'], alpha=0.3, s=10)
+plt.title('Net Penalty vs. Pre-2012 Medicare Discharges')
+plt.xlabel('Average Medicare Discharges (2009-2011)')
+plt.ylabel('Net Penalty (2012)')
+plt.tight_layout()
+plt.show()
+```
+
+### Question 8
+
+```{python}
+# --- First Stage ---
+fs1 = smf.ols('net_penalty ~ avg_mcare_discharges', data=df_iv).fit()
+fs2 = smf.ols('net_penalty ~ avg_mcare_discharges + avg_beds', data=df_iv).fit()
+fs3 = smf.ols('net_penalty ~ avg_mcare_discharges + avg_beds + avg_mcaid_discharges', data=df_iv).fit()
+
+# --- Reduced Form ---
+rf1 = smf.ols('price_change ~ avg_mcare_discharges', data=df_iv).fit()
+rf2 = smf.ols('price_change ~ avg_mcare_discharges + avg_beds', data=df_iv).fit()
+rf3 = smf.ols('price_change ~ avg_mcare_discharges + avg_beds + avg_mcaid_discharges', data=df_iv).fit()
+```
+
+```{python}
+table_fs = summary_col(
+    [fs1, fs2, fs3],
+    stars=True,
+    model_names=['Baseline', 'Baseline + Beds', 'Baseline + Beds + Medicaid'],
+    info_dict={'N': lambda x: f"{int(x.nobs):,}", 'R²': lambda x: f"{x.rsquared:.3f}"}
+)
+table_fs.add_title("First Stage")
+print(table_fs)
+```
+
+```{python}
+table_rf = summary_col(
+    [rf1, rf2, rf3],
+    stars=True,
+    model_names=['Baseline', 'Baseline + Beds', 'Baseline + Beds + Medicaid'],
+    info_dict={'N': lambda x: f"{int(x.nobs):,}", 'R²': lambda x: f"{x.rsquared:.3f}"}
+)
+table_rf.add_title("Reduced Form")
+print(table_rf)
+```
+
+### Question 9
+
+```{python}
+iv_coef1 = rf1.params['avg_mcare_discharges'] / fs1.params['avg_mcare_discharges']
+iv_coef2 = rf2.params['avg_mcare_discharges'] / fs2.params['avg_mcare_discharges']
+iv_coef3 = rf3.params['avg_mcare_discharges'] / fs3.params['avg_mcare_discharges']
+
+print("IV Estimates of net penalty effect on price change:")
+print(f"  Baseline:                  {iv_coef1:.4f}")
+print(f"  Baseline + Beds:           {iv_coef2:.4f}")
+print(f"  Baseline + Beds + Medicaid:{iv_coef3:.4f}")
+```
+
+```{python}
+from linearmodels.iv import IV2SLS
+
+iv1 = IV2SLS.from_formula('price_change ~ 1 + [net_penalty ~ avg_mcare_discharges]', data=df_iv).fit()
+iv2 = IV2SLS.from_formula('price_change ~ 1 + avg_beds + [net_penalty ~ avg_mcare_discharges]', data=df_iv).fit()
+iv3 = IV2SLS.from_formula('price_change ~ 1 + avg_beds + avg_mcaid_discharges + [net_penalty ~ avg_mcare_discharges]', data=df_iv).fit()
+
+
+results = {
+    'Specification': ['Baseline', 'Baseline + Beds', 'Baseline + Beds + Medicaid'],
+    'IV Estimate': [iv_coef1, iv_coef2, iv_coef3]
+}
+
+iv_table = pd.DataFrame(results)
+iv_table['IV Estimate'] = iv_table['IV Estimate'].round(4)
+print(iv_table.to_string(index=False))
+```
+
+### Question 10
+
+This LATE looks at the effect of HRRP/VBP penalties on price changes only for hospitals whose penalty status was influenced by their pre-2012 Medicare discharge volume. These are hospitals that were penalized specifically because they had high Medicare exposure, not hospitals that were penalized or not penalized regardless of their Medicare volume.
+The LATE may differ from the overall ATE because hospitals with high Medicare discharge volume may be larger and treat sicker patients, so their pricing response to penalties may not be representative of all hospitals. Hospitals with lower Medicare exposure might respond to penalties differently due to its own internal factors (size, patient demographic, location, etc.), meaning the overall ATE could be larger or smaller than what this LATE captures.
+
