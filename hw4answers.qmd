@@ -1,5 +1,5 @@
 ---
-title: HW 4-2
+title: HW 4-3
 jupyter: econ470-a0kernel
 execute:
   echo: false
